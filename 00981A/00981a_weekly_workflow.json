@@ -1,0 +1,81 @@
+{
+  "name": "00981A - 週持股比對",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 1 * * 6"
+            }
+          ]
+        }
+      },
+      "id": "981w-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "command": "python3 /Users/starmark/Downloads/scripts/00981A/00981a_weekly_compare.py"
+      },
+      "id": "981w-exec",
+      "name": "執行週比對",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const stdout = $input.first().json.stdout;\nif (!stdout) {\n  return [{ json: { text: '❌ 錯誤：週比對無輸出' } }];\n}\nreturn [{ json: { text: stdout.trim() } }];"
+      },
+      "id": "981w-extract",
+      "name": "整理週報告",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/push",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 2rZZ4ZNElqU/Py8f0AX7ObFsOxQCgHPViad4szhIK5uT59uDTFpR3OprhLRvVMxjvkriekquktIVhCj8PkwQqUmdt9fbBuwsvnpi46A+TvUWMeqOVDOb2748AnmCL1YcSb1nm6CP2NDboTTBeTFBbwdB04t89/1O/w1cDnyilFU="
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"to\": \"Ua1b88020d3f6a8587a77ae6e0062c45e\",\n  \"messages\": [\n    {\n      \"type\": \"text\",\n      \"text\": {{ JSON.stringify($json.text) }}\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "981w-line",
+      "name": "LINE 週報",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 0]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "執行週比對", "type": "main", "index": 0 }]]
+    },
+    "執行週比對": {
+      "main": [[{ "node": "整理週報告", "type": "main", "index": 0 }]]
+    },
+    "整理週報告": {
+      "main": [[{ "node": "LINE 週報", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "timezone": "Asia/Taipei",
+    "executionOrder": "v1"
+  }
+}

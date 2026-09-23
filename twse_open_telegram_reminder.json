@@ -1,0 +1,59 @@
+{
+  "name": "台股開盤 Telegram 提醒",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "50 8,10,12 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "週一至週五 08:50/10:50/12:50",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "1085373824",
+        "text": "📈 台股開盤提醒\n\n在這裡編輯你的注意事項：\n- \n- \n- ",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "telegram-send",
+      "name": "送出 Telegram 訊息",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [640, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "週一至週五 08:50/10:50/12:50": {
+      "main": [
+        [
+          {
+            "node": "送出 Telegram 訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "timezone": "Asia/Taipei"
+  }
+}

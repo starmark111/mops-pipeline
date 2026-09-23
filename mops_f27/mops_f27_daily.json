@@ -1,0 +1,134 @@
+{
+  "name": "MOPS F27 Daily - 每日季報損益",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0,6,12,18 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger-f27",
+      "name": "Schedule Trigger (週一至五 每6小時)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        320
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger-f27",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "command": "DATE=$(date +%Y-%m-%d); python3 /Users/starmark/Downloads/scripts/mops_f27/backfill_send_f27.py $DATE $DATE --fetch --emit"
+      },
+      "id": "execute-f27-emit",
+      "name": "執行 backfill_send_f27.py（抓取+輸出JSON）",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        480,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout;\nconst messages = JSON.parse(raw);\nfunction escapeHtml(text) {\n  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\nreturn messages.map(m => ({ json: { group: m.group || m.sheet, message: '<pre>' + escapeHtml(m.message) + '</pre>' } }));"
+      },
+      "id": "split-messages-f27",
+      "name": "拆分各分頁訊息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "1085373824",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "telegram-send-f27",
+      "name": "Telegram 發送季報損益",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        400
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram - Market Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (週一至五 每6小時)": {
+      "main": [
+        [
+          {
+            "node": "執行 backfill_send_f27.py（抓取+輸出JSON）",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "執行 backfill_send_f27.py（抓取+輸出JSON）",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "執行 backfill_send_f27.py（抓取+輸出JSON）": {
+      "main": [
+        [
+          {
+            "node": "拆分各分頁訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "拆分各分頁訊息": {
+      "main": [
+        [
+          {
+            "node": "Telegram 發送季報損益",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Asia/Taipei"
+  }
+}

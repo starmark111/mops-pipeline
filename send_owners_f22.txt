@@ -1,0 +1,4 @@
+# 已停用：清單收斂到 watchlist_active.csv 單一檔案（2026-07-14）
+# 要恢復人名過濾，把名字取消註解即可
+# Ryan
+# Edison

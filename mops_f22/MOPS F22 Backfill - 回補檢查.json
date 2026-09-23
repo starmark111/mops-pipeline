@@ -1,0 +1,123 @@
+{
+  "name": "MOPS F22 Backfill - 回補檢查",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2,14 * * *"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-1111-4a01-9001-aa0000000001",
+      "name": "Schedule Trigger (每天 02:00 / 14:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "command": "python3 /Users/starmark/Downloads/scripts/mops_f22/check_backfill_f22.py --hours 48 --emit"
+      },
+      "id": "a1b2c3d4-2222-4a02-9002-aa0000000002",
+      "name": "執行 check_backfill_f22.py（回補+輸出摘要JSON）",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        624,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = ($input.first().json.stdout || '').trim();\nfunction escapeHtml(text) {\n  return (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\nlet messages;\ntry {\n  messages = JSON.parse(raw);\n  if (!Array.isArray(messages)) messages = [{ message: raw, group: 'f22_backfill' }];\n} catch (e) {\n  // stdout 不是 JSON（例如沒帶 --emit）→ 整段純文字當一則訊息送出\n  messages = raw ? [{ message: raw, group: 'f22_backfill' }] : [];\n}\nreturn messages.map(m => ({ json: { group: m.group || m.sheet || 'f22_backfill', message: escapeHtml(m.message) } }));"
+      },
+      "id": "a1b2c3d4-3333-4a03-9003-aa0000000003",
+      "name": "拆分回補摘要訊息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        848,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "1085373824",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "a1b2c3d4-4444-4a04-9004-aa0000000004",
+      "name": "Telegram 發送回補摘要",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1072,
+        624
+      ],
+      "webhookId": "a1b2c3d4-5555-4a05-9005-aa0000000005",
+      "credentials": {
+        "telegramApi": {
+          "id": "358ocwcFSm7DB5jO",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger (每天 02:00 / 14:00)": {
+      "main": [
+        [
+          {
+            "node": "執行 check_backfill_f22.py（回補+輸出摘要JSON）",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "執行 check_backfill_f22.py（回補+輸出摘要JSON）": {
+      "main": [
+        [
+          {
+            "node": "拆分回補摘要訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "拆分回補摘要訊息": {
+      "main": [
+        [
+          {
+            "node": "Telegram 發送回補摘要",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a1b2c3d4-6666-4a06-9006-aa0000000006",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0cfdce544a064d449056c2a2c91a99170708765541f5bec4b711f78b66ca2907"
+  },
+  "id": "a1b2c3d4-7777-4a07-9007-aa0000000007",
+  "tags": []
+}

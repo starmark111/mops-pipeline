@@ -1,0 +1,35 @@
+# ===== 憑證：絕對不可上傳 =====
+credentials.json
+token.json
+*.pem
+*.key
+
+# ===== 資料檔：每天變動，不進版控 =====
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+*.xls
+daily_important_event/raw_archive/
+_probe/raw/
+_probe/*.txt
+_probe/probe_result.json
+
+# ===== 備份與暫存 =====
+*.bak-*
+*.bak
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+chromedriver/
+
+# ===== 執行狀態：不進版控 =====
+sent_state*.json
+rotation_state.json
+*checkpoint.txt
+.cache/
+.claude/
+*.tmp
+.*.tmp

@@ -1,0 +1,138 @@
+{
+  "name": "每個月值日生輪值表",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 * * SUN"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "7cb327c3-dd04-4530-9f02-c86498bb856a",
+      "name": "Schedule Trigger",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "retryOnFail": false,
+      "waitBetweenTries": 5000,
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/push",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "=Content-Type",
+              "value": "=application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer 2rZZ4ZNElqU/Py8f0AX7ObFsOxQCgHPViad4szhIK5uT59uDTFpR3OprhLRvVMxjvkriekquktIVhCj8PkwQqUmdt9fbBuwsvnpi46A+TvUWMeqOVDOb2748AnmCL1YcSb1nm6CP2NDboTTBeTFBbwdB04t89/1O/w1cDnyilFU="
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"to\": \"Ua1b88020d3f6a8587a77ae6e0062c45e\",\n  \"messages\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"{{ $json.text }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        848,
+        0
+      ],
+      "id": "aac7423e-36a9-4564-9c52-e4f1ca4b1a43",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "command": "python3 /Users/starmark/Downloads/scripts/rotation_v2.py"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        432,
+        0
+      ],
+      "id": "43ef3db5-caae-4fb7-b082-158350d73c02",
+      "name": "Execute Command"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 取得 stdout，如果抓不到就回報錯誤原因\nconst stdout = $input.first().json.stdout;\n\nif (!stdout) {\n    return [{ json: { text: \"錯誤：Python 執行成功但沒有 print 任何內容。\" } }];\n}\n\nreturn [\n  {\n    json: {\n      text: stdout.trim()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        0
+      ],
+      "id": "62bd015f-cbdc-4083-975d-d68a324ab208",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Execute Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Command": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        []
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "2831cff3-2cf4-45de-a350-16549af1b1ea",
+  "meta": {
+    "instanceId": "e375d79045539638d068acb36c7276716df16351a4be8b208991b2a374cdfd3a"
+  },
+  "id": "MkAbJTUqqyVkPecG",
+  "tags": []
+}

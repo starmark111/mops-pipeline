@@ -1,0 +1,88 @@
+{
+  "name": "Market Check - 美股時段行情通知",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 9,11,13,15 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger-us",
+      "name": "Schedule Trigger (美股)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "python3 /Users/starmark/Downloads/scripts/market_check.py"
+      },
+      "id": "execute-command-us",
+      "name": "執行 market_check.py",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "1085373824",
+        "text": "={{ $json.stdout }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "telegram-send-us",
+      "name": "Telegram 發送行情",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram - Market Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (美股)": {
+      "main": [
+        [
+          {
+            "node": "執行 market_check.py",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "執行 market_check.py": {
+      "main": [
+        [
+          {
+            "node": "Telegram 發送行情",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "America/New_York"
+  },
+  "id": "dcb96ed3-c586-4202-a209-d8d29558f3d2"
+}

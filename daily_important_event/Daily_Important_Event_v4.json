@@ -1,0 +1,112 @@
+{
+  "name": "Daily Important Event - 每日重大訊息",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8,11,14,17,20,23 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger-daily",
+      "name": "Schedule Trigger (每日 08:00–23:00 每3小時)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "python3 /Users/starmark/Downloads/scripts/daily_important_event/Daily_Important_Event_v4.py"
+      },
+      "id": "execute-daily-event",
+      "name": "執行 Daily_Important_Event.py",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout;\nconst messages = JSON.parse(raw);\nfunction escapeHtml(text) {\n  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\nreturn messages.map(m => ({ json: { group: m.group || m.sheet, message: '<pre>' + escapeHtml(m.message) + '</pre>' } }));"
+      },
+      "id": "split-messages",
+      "name": "拆分各分頁訊息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "1085373824",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "telegram-send-daily",
+      "name": "Telegram 發送重大訊息",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram - Market Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (每日 08:00–23:00 每3小時)": {
+      "main": [
+        [
+          {
+            "node": "執行 Daily_Important_Event.py",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "執行 Daily_Important_Event.py": {
+      "main": [
+        [
+          {
+            "node": "拆分各分頁訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "拆分各分頁訊息": {
+      "main": [
+        [
+          {
+            "node": "Telegram 發送重大訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Asia/Taipei"
+  }
+}

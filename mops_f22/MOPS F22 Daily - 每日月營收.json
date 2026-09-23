@@ -1,0 +1,123 @@
+{
+  "name": "MOPS F22 Daily - 每日月營收",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 11 * *"
+            }
+          ]
+        }
+      },
+      "id": "f3e55f4a-7ea8-4088-8d5f-a8974ce31636",
+      "name": "Schedule Trigger (每月11日 10:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "command": "python3 /Users/starmark/Downloads/scripts/mops_f22/backfill_send_f22.py $(date +%Y-%m-%d) $(date +%Y-%m-%d) --fetch --emit"
+      },
+      "id": "9171d53b-34c2-4e87-8989-06c66ce55c1c",
+      "name": "執行 backfill_send_f22.py（抓取+輸出JSON）",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        624,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout;\nconst messages = JSON.parse(raw);\nfunction escapeHtml(text) {\n  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\nreturn messages.map(m => ({ json: { group: m.group || m.sheet, message: escapeHtml(m.message) } }));"
+      },
+      "id": "fc6ba0fd-6a1c-4c82-a253-f670371ddf98",
+      "name": "拆分各分頁訊息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        848,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "1085373824",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "bc59cf4e-73c0-4dff-8ef4-5b64d46dd777",
+      "name": "Telegram 發送月營收",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1072,
+        624
+      ],
+      "webhookId": "4345d01d-dd38-42a9-8dfe-f7c17732760f",
+      "credentials": {
+        "telegramApi": {
+          "id": "358ocwcFSm7DB5jO",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger (每月11日 10:00)": {
+      "main": [
+        [
+          {
+            "node": "執行 backfill_send_f22.py（抓取+輸出JSON）",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "執行 backfill_send_f22.py（抓取+輸出JSON）": {
+      "main": [
+        [
+          {
+            "node": "拆分各分頁訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "拆分各分頁訊息": {
+      "main": [
+        [
+          {
+            "node": "Telegram 發送月營收",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "118db5a2-5259-4e26-932e-80037df98536",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0cfdce544a064d449056c2a2c91a99170708765541f5bec4b711f78b66ca2907"
+  },
+  "id": "d31dc5ff-52ad-4e6b-acc3-53a6a31a6014",
+  "tags": []
+}
