@@ -6,6 +6,7 @@ token.json
 
 # ===== 資料檔：每天變動，不進版控 =====
 *.csv
+!watchlist_active.csv
 *.db
 *.sqlite
 *.sqlite3
