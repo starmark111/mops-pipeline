@@ -391,6 +391,9 @@ CSV_COLUMNS = [
     "gross_profit", "operating_income", "pretax_income",
     "net_income", "net_income_parent", "total_comprehensive_income",
     "eps", "eps_diluted",
+    # 2026-10-30 新增：本期單季 EPS。上面的 eps/eps_diluted 是累計，
+    # 兩者口徑不同，需分開保存（修正前 Q2/Q3 的 eps 誤存成單季值）。
+    "eps_q", "eps_q_diluted",
     # ── meta（與 F22 對齊）──
     "remark", "announce_date", "announce_time", "source_url", "fetched_at",
 ]
@@ -614,11 +617,21 @@ def parse_income_statement(html: str) -> dict | None:
                 return _to_int(v[idx])
         return None
 
-    def eps(cands):
+    def eps(cands, idx):
+        """依欄位索引取 EPS（比照 amt()）。
+
+        2026-10-30 修正：原本寫死 v[0]，但 MOPS 表頭欄序隨季別變動——
+            Q1   ：[本期累計, 本期單季, 去年累計, 去年單季] → 第0欄是累計（剛好對）
+            Q2/Q3：[本期單季, 去年單季, 本期累計, 去年累計] → 第0欄是單季（取錯）
+        導致 Q2/Q3 的 eps/eps_diluted 存成單季值，與同列其他「累計」獲利欄位
+        口徑不一致（實證 3443 創意 2026：Q2 存 11.61、Q3 存 16.95，
+        以單季母淨回推股數皆為 13.40 億股，確認為單季）。
+        金額欄位走 amt(..., I_CUM) 本來就依表頭判斷，故不受影響。
+        """
         for label in cands:
             v = table.get(label)
-            if v and v[0].strip() != "":
-                return _to_float(v[0])
+            if v and idx is not None and idx < len(v) and v[idx].strip() != "":
+                return _to_float(v[idx])
         return None
 
     # ── 業別判斷（決定主要收益科目與顯示）──
@@ -682,8 +695,12 @@ def parse_income_statement(html: str) -> dict | None:
         "net_income_parent":          parent,
         "total_comprehensive_income": amt(["本期綜合損益總額", "本期綜合損益總額（稅後）"], I_CUM),
         # EPS（元）
-        "eps":          eps(["基本每股盈餘", "基本每股盈餘合計"]),
-        "eps_diluted":  eps(["稀釋每股盈餘", "稀釋每股盈餘合計"]),
+        # eps/eps_diluted = 本期累計（與同列其他獲利欄位同口徑）
+        "eps":            eps(["基本每股盈餘", "基本每股盈餘合計"], I_CUM),
+        "eps_diluted":    eps(["稀釋每股盈餘", "稀釋每股盈餘合計"], I_CUM),
+        # eps_q/eps_q_diluted = 本期單季（年報無單季欄時 I_Q 會退回 I_CUM）
+        "eps_q":          eps(["基本每股盈餘", "基本每股盈餘合計"], I_Q),
+        "eps_q_diluted":  eps(["稀釋每股盈餘", "稀釋每股盈餘合計"], I_Q),
         "remark": "",
     }
 
@@ -840,12 +857,19 @@ def format_company_block(item: dict, rec: dict) -> str:
     lines.append(f"營益: {_fmt_m(rec['operating_income'])}")
     lines.append(f"稅前淨利: {_fmt_m(rec['pretax_income'])}")
     lines.append(f"母公司淨利: {_fmt_m(rec['net_income_parent'])}")
-    lines.append(f"EPS: {_fmt_eps(rec['eps'])}")
+    # EPS 標明累計，並在有單季值時一併列出。
+    # 2026-10-30 之前 eps 欄誤存單季值，與本區塊「累計損益」標題不符（見 eps() 註解）。
+    eps_cum, eps_q = rec.get("eps"), rec.get("eps_q")
+    if eps_q is not None and eps_cum is not None and abs(eps_q - eps_cum) > 0.005:
+        lines.append(f"EPS: {_fmt_eps(eps_cum)}（累計）／{_fmt_eps(eps_q)}（單季）")
+    else:
+        lines.append(f"EPS: {_fmt_eps(eps_cum)}")
 
+    # YoY 與 QoQ 口徑不同：YoY 比的是累計營收、QoQ 比的是單季營收，標題寫清楚免誤讀
     yoy = _fmt_pct(rec.get("ytd_yoy_pct"))
     qoq = _fmt_pct(get_qoq_pct(item, rec))
     if yoy != "-" or qoq != "-":
-        lines.append(f"YoY {yoy}  QoQ {qoq}")
+        lines.append(f"YoY {yoy}（累計）  QoQ {qoq}（單季）")
 
     for tag in _new_high_tags(item, rec):
         lines.append(tag)
@@ -889,7 +913,8 @@ def save_to_csv(records: list) -> int:
                   "ytd_revenue", "ytd_revenue_last", "ytd_yoy_amt", "ytd_yoy_pct",
                   "gross_profit", "operating_income", "pretax_income",
                   "net_income", "net_income_parent", "total_comprehensive_income",
-                  "eps", "eps_diluted", "remark"]:
+                  "eps", "eps_diluted",
+                  "eps_q", "eps_q_diluted", "remark"]:
             v = rec.get(k)
             row[k] = "" if v is None else v
         new_rows.append(row)

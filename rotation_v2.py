@@ -6,7 +6,7 @@ import requests
 
 # 初始設定
 CONFIG_FILE = "/Users/starmark/Downloads/scripts/rotation_state.json"
-DEFAULT_ROTATION = ["黃同學", "劉同學", "王同學"]
+DEFAULT_ROTATION = ["劉同學", "楊同學", "王同學"]
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -14,9 +14,13 @@ def load_config():
             return json.load(f)
     return {"rotation": DEFAULT_ROTATION, "next_index": 1}
 
-def save_config(rotation, next_index):
+def save_config(rotation, next_index, anchor_monday=None, anchor_index=None):
+    data = {"rotation": rotation, "next_index": next_index}
+    if anchor_monday is not None:
+        data["anchor_monday"] = anchor_monday   # 基準週一 (YYYY-MM-DD)
+        data["anchor_index"] = anchor_index     # 基準週值日生的索引
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"rotation": rotation, "next_index": next_index}, f, ensure_ascii=False, indent=4)
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def get_monday(date):
     return date - timedelta(days=date.weekday())
@@ -26,15 +30,24 @@ def generate_schedule(manual_start_name=None, new_rotation=None, weeks=4):
     config = load_config()
     rotation = new_rotation if new_rotation else config["rotation"]
 
-    # 2. 確定起始索引
-    if manual_start_name and manual_start_name in rotation:
-        person_index = rotation.index(manual_start_name)
-    else:
-        person_index = config["next_index"] % len(rotation)
-
     # 時間計算邏輯
     today = datetime.today()
     start_monday = get_monday(today)
+    this_monday_str = start_monday.strftime("%Y-%m-%d")
+
+    # 2. 確定起始索引（依日期計算，同一週重複執行結果相同）
+    if manual_start_name and manual_start_name in rotation:
+        person_index = rotation.index(manual_start_name)
+        anchor_monday, anchor_index = this_monday_str, person_index
+    elif new_rotation or "anchor_monday" not in config:
+        # 換名單或舊版 json：以本週為基準
+        person_index = config.get("next_index", 0) % len(rotation)
+        anchor_monday, anchor_index = this_monday_str, person_index
+    else:
+        anchor_monday, anchor_index = config["anchor_monday"], config["anchor_index"]
+        anchor_dt = datetime.strptime(anchor_monday, "%Y-%m-%d")
+        weeks_passed = (start_monday.date() - anchor_dt.date()).days // 7
+        person_index = (anchor_index + weeks_passed) % len(rotation)
 
     result = []
     monday = start_monday
@@ -59,7 +72,7 @@ def generate_schedule(manual_start_name=None, new_rotation=None, weeks=4):
         monday += timedelta(days=7)
 
     # 4. 儲存進度
-    save_config(rotation, final_next_index)
+    save_config(rotation, final_next_index, anchor_monday, anchor_index)
 
     return result
 

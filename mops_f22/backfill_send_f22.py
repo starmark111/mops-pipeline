@@ -182,8 +182,11 @@ def build_messages_from_csv(rows_by_date: dict, dt: datetime) -> list:
 
     pairs = []
     for r in rows:
+        # announce_date 必須帶上：format_company_block() 會拿它與 CSV 既有列比對，
+        # 不同才標〔更正〕。漏傳會變成 None vs 實際日期，導致補發訊息全被誤標成更正。
         item = {"stock_id": r["stock_id"], "company_name": r["company_name"],
-                "report_year": r["report_year"], "report_month": r["report_month"]}
+                "report_year": r["report_year"], "report_month": r["report_month"],
+                "announce_date": r.get("announce_date", "")}
         rev = {"revenue": _to_int(r["revenue"]), "yoy_pct": _to_float(r["yoy_pct"]),
                "ytd_revenue": _to_int(r["ytd_revenue"]), "ytd_yoy_pct": _to_float(r["ytd_yoy_pct"]),
                "remark": r.get("remark", "")}

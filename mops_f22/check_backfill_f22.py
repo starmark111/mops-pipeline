@@ -65,7 +65,7 @@ def parse_args():
     days = 7
     hours = None
     dates = []
-    dry_run = emit = no_gdrive = False
+    dry_run = emit = no_gdrive = send = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -73,6 +73,8 @@ def parse_args():
             dry_run = True
         elif a == "--emit":
             emit = True
+        elif a == "--send":
+            send = True
         elif a == "--no-gdrive":
             no_gdrive = True
         elif a == "--strict-exit":
@@ -109,7 +111,7 @@ def parse_args():
 
     # --hours 優先（滾動時間窗），不用日期區間
     if hours is not None:
-        return hours, None, None, dry_run, emit, no_gdrive
+        return hours, None, None, dry_run, emit, no_gdrive, send
 
     if len(dates) >= 2:
         try:
@@ -123,7 +125,7 @@ def parse_args():
         sdate = edate - timedelta(days=max(days, 1) - 1)
     if sdate > edate:
         sdate, edate = edate, sdate
-    return None, sdate, edate, dry_run, emit, no_gdrive
+    return None, sdate, edate, dry_run, emit, no_gdrive, send
 
 
 def _announce_dt(item):
@@ -165,7 +167,7 @@ def daterange(sdate, edate):
 # 主流程
 # =========================
 def run():
-    hours, sdate, edate, dry_run, emit, no_gdrive = parse_args()
+    hours, sdate, edate, dry_run, emit, no_gdrive, send = parse_args()
     existing = load_existing_keys()
     F22.reset_fetch_stats()   # 記錄 ezsearch 是否真的查成（見下方 _verify_verdict）
 
@@ -178,18 +180,19 @@ def run():
         while d <= win_end.date():
             scan_dates.append(datetime(d.year, d.month, d.day))
             d += timedelta(days=1)
-        range_label = f"近 {hours} 小時（{win_start:%m/%d %H:%M} ~ {win_end:%m/%d %H:%M}）"
+        # 期間標籤格式與 F27 的 find_missing_f27.py 保持一致（M/D ~ M/D）
+        range_label = f"{win_start:%m/%d} ~ {win_end:%m/%d}"
     else:
         win_start = win_end = None
         scan_dates = list(daterange(sdate, edate))
-        range_label = (f"區間 {sdate:%Y-%m-%d} ~ {edate:%Y-%m-%d}"
-                       f"（共 {(edate - sdate).days + 1} 天）")
+        range_label = f"{sdate:%m/%d} ~ {edate:%m/%d}"
 
     src = "🔍 只檢查（不寫入）" if dry_run else "🛠️  檢查並回補"
     sys.stderr.write(f"{src} | {range_label}\n\n")
 
     report = []          # 每天一筆統計
     to_fill = []         # [(item, rev), ...] 待寫入
+    announced_all = {}   # {(股號,年,月): item} 本次 MOPS 掃到的所有公告，供清單覆蓋檢查
     fails = []           # 異常清單 [{date,id,name,reason}]
     filled_keys = set()  # 跨日去重（同一檔可能在多天清單出現）
 
@@ -314,6 +317,8 @@ def run():
                 time.sleep(0.4)
 
             to_fill.extend(day_filled)
+            for _it in uniq:
+                announced_all[(_it["stock_id"], str(_it["report_year"]), str(_it["report_month"]))] = _it
             report.append({
                 "date": day_str,
                 "weekday": d.weekday(),           # 0=週一
@@ -344,11 +349,22 @@ def run():
             gdrive_url = F22.upload_to_gdrive()
             sys.stderr.write(f"☁️  Google Drive：{'已上傳 ' + gdrive_url if gdrive_url else '⚠️ 上傳失敗（請檢查 token.json / credentials.json）'}\n")
 
+    # ── --send：補完資料後接著補發 Telegram 訊息 ────────────────────────
+    # 為什麼需要：本支只寫 CSV，而每日排程只看「當天新抓到的公告」、不回頭掃 CSV，
+    # 因此靠回補救回來的資料，訊息永遠不會發出（2026/08 曾有 32 檔清單內公司
+    # 資料已入庫卻從未通知）。加上 --send 才算真正完成「有公告就一定收到訊息」。
+    # 作法：直接呼叫既有的 backfill_send_f22.py，格式、分群、去重全部沿用，
+    # 不另外複製一套發送邏輯。sent_state 會自動跳過已發送者，可安全重跑。
+    sent_n = None
+    if send and not dry_run and written:
+        sent_n = _do_send(to_fill, emit)
+
     # ── 判定「這次檢查本身可不可信」───────────────────────────────
     verdict = _verify_verdict(report)
 
     # ── 組「回補摘要」訊息（給人看 / 給 n8n） ─────────────────────────
-    msg = build_summary(range_label, report, to_fill, fails, written, dry_run, verdict)
+    audit = audit_watchlist_delivery(announced_all)
+    msg = build_summary(range_label, report, to_fill, fails, written, dry_run, verdict, sent_n, audit)
 
     if emit:
         print(json.dumps([{"message": msg, "group": "f22_backfill"}], ensure_ascii=False))
@@ -422,88 +438,199 @@ def _verify_verdict(report) -> dict:
 # =========================
 # 摘要訊息
 # =========================
-def build_summary(range_label, report, to_fill, fails, written, dry_run, verdict=None) -> str:
-    # 金融股（已知不支援）與真異常分開呈現
-    fin_fails  = [f for f in fails if "金融股格式" in f["reason"]]
-    fails      = [f for f in fails if "金融股格式" not in f["reason"]]
+# =========================
+# --send：補發回補資料的 Telegram 訊息
+# =========================
+# 為什麼需要：本支只寫 CSV，而每日排程只看「當天新抓到的公告」、不回頭掃 CSV，
+# 因此靠回補救回來的資料，訊息永遠不會發出（2026/08 曾有 32 檔清單內公司
+# 資料已入庫卻從未通知）。加上 --send 才算真正完成「有公告就一定收到訊息」。
+#
+# 兩道安全閥（2026-09-30 加入）：
+#   1. SEND_MAX_DAYS：只補發近 N 天的公告。failed/缺漏清單可能累積數月份的舊資料
+#      （實測 F27 的 failed_fetches 橫跨 17 個月），全送會被舊季報洗版。
+#   2. SEND_WARN_LIMIT：預估則數超過上限就停下來只報告，需加 --force 才真的送。
+# 兩者都可被 --force 略過，不會造成「永遠送不出去」。
+SEND_MAX_DAYS    = 30
+SEND_WARN_LIMIT  = 50
+
+
+def _do_send(to_fill, emit):
+    """呼叫既有的 backfill_send_f22.py 補發訊息（不另寫一套發送邏輯，
+    格式／分群／去重全部沿用；sent_state 會自動跳過已發送者，可安全重跑）。"""
+    import subprocess
+
+    force = "--force" in sys.argv
+    sys.stderr.write("\n📨 --send：補發回補資料的 Telegram 訊息…\n")
+
+    all_dates = sorted({it["announce_date"] for it, _ in to_fill if it.get("announce_date")})
+    if not all_dates:
+        sys.stderr.write("  （回補資料無公告日期，略過補發）\n")
+        return 0
+
+    # ── 安全閥 1：日期範圍 ──
+    cutoff = (datetime.now() - timedelta(days=SEND_MAX_DAYS)).strftime("%Y-%m-%d")
+    dates = [d for d in all_dates if d >= cutoff] if not force else all_dates
+    skipped = [d for d in all_dates if d < cutoff] if not force else []
+    if skipped:
+        sys.stderr.write(
+            f"  ⏳ 略過 {len(skipped)} 個超過 {SEND_MAX_DAYS} 天的公告日"
+            f"（{skipped[0]} ~ {skipped[-1]}），避免舊資料洗版。\n"
+            f"     要補發這些請加 --force。\n")
+    if not dates:
+        sys.stderr.write("  （近期無可補發的公告）\n")
+        return 0
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backfill_send_f22.py")
+    base   = [sys.executable, script, dates[0], dates[-1]]
+
+    # ── 安全閥 2：先 dry-run 預估則數（dry-run 不會寫 sent_state，安全）──
+    if not force:
+        probe = subprocess.run(base + ["--dry-run"], capture_output=True, text=True)
+        n = sum(int(m.group(1)) for m in re.finditer(r"本日 (\d+) 則", probe.stderr))
+        if n > SEND_WARN_LIMIT:
+            sys.stderr.write(
+                f"  ⚠️  預估會送出 {n} 則（超過上限 {SEND_WARN_LIMIT}），已停止未發送。\n"
+                f"     區間 {dates[0]} ~ {dates[-1]}。確認要送請加 --force，"
+                f"或先手動跑：\n"
+                f"     python3 backfill_send_f22.py {dates[0]} {dates[-1]} --dry-run\n")
+            return 0
+        sys.stderr.write(f"  預估 {n} 則，開始補發…\n")
+
+    cmd = base + (["--emit"] if emit else [])
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    sys.stderr.write(r.stderr)
+    if emit and r.stdout.strip():
+        print(r.stdout.strip())   # 補發訊息的 JSON 另印一行，n8n 可一併取用
+    if r.returncode != 0:
+        sys.stderr.write(f"⚠️  補發失敗（return code {r.returncode}），資料已寫入但訊息未送出\n")
+        return 0
+    return sum(int(m.group(1)) for m in re.finditer(r"本日 (\d+) 則", r.stderr))
+
+
+def audit_watchlist_delivery(announced):
+    """清單覆蓋檢查：本次 MOPS 掃到的公告中，屬於關注清單的公司是否都已發送。
+
+    核心要求「清單內公司只要有公告就一定要收到訊息」的最終驗證。
+    前面的查漏只管 MOPS→CSV，這裡補上 CSV→Telegram 那一段。
+
+    ⚠️ 基準用「本次 MOPS 掃到的公告」(announced)，不是 CSV 的 announce_date——
+       公司可能重複公告，CSV 只留最初那筆的日期，用 CSV 日期去撈會撈不到，
+       導致摘要出現「MOPS 公告 N 筆」卻「清單內無公告」這種自相矛盾的結果。
+    ⚠️ 與 mops_f27/find_missing_f27.py 的同名函式邏輯一致，改一邊要改另一邊。
+
+    回傳 (未發送清單, 清單命中總數)。
+    """
+    import io as _io
+    F22._load_watchlist()
+
+    try:
+        with open(F22.SENT_STATE_PATH, encoding="utf-8") as f:
+            sent = set(json.load(f).keys())
+    except Exception:
+        sent = set()
+
+    # CSV 的 revenue 是組 sent_state key 的必要欄位，建索引備查
+    csv_idx = {}
+    try:
+        with open(F22.CSV_PATH, "rb") as f:
+            raw = f.read().replace(b"\x00", b"")
+        for r in csv.DictReader(_io.StringIO(raw.decode("utf-8", errors="replace"))):
+            csv_idx[(r["stock_id"], str(r["report_year"]), str(r["report_month"]))] = r
+    except Exception:
+        pass
+
+    unsent, total = [], 0
+    oldest = None
+    for (sid, y, m), it in announced.items():
+        groups = F22.get_groups(sid, it.get("company_name", ""))
+        if not groups:
+            continue
+        total += 1
+        d = it.get("announce_date", "")
+        if d and (oldest is None or d < oldest):
+            oldest = d
+        row = csv_idx.get((sid, str(y), str(m)))
+        key = f"{sid}|{y}|{m}|{row.get('revenue','')}" if row else None
+        if key is None or key not in sent:
+            unsent.append((sid, it.get("company_name", ""), "／".join(groups)))
+
+    # sent_state 只保留 SENT_KEEP_DAYS 天（F22=45），更舊的紀錄會被自動清除。
+    # 若掃描區間早於保留期，「未發送」判定不可信——當時可能發過但紀錄已過期。
+    # 回傳 stale=True 讓摘要改口徑，避免誤報成「全部沒發」。
+    cutoff = (datetime.now() - timedelta(days=F22.SENT_KEEP_DAYS)).strftime("%Y-%m-%d")
+    stale = bool(oldest and oldest < cutoff)
+    return unsent, total, stale
+
+
+def build_summary(range_label, report, to_fill, fails, written, dry_run,
+                  verdict=None, sent_n=None, audit=None) -> str:
+    """回補摘要訊息。
+    ⚠️ 格式必須與 mops_f27/find_missing_f27.py 的 build_summary() 保持一致，
+       兩邊是同一種東西，只差「期間單位」（F22=年/月、F27=年Q季）。改一邊要改另一邊。
+
+    版型（固定四段，沒有內容的段落不出現）：
+        🔁 F22 回補檢查 {期間}
+        MOPS 公告 N 筆 / 回補 M 筆
+        ── 補回清單 ──            ← 有缺漏才出現
+        ⚠️/🏦/📨 各一行            ← 有才出現
+        ✅ 結論行
+    """
+    fin_fails = [f for f in fails if "金融股格式" in f["reason"]]
+    fails     = [f for f in fails if "金融股格式" not in f["reason"]]
     total_announced = sum(r["announced"] for r in report)
-    total_fill = len(to_fill)
-    total_fail = len(fails)
 
-    header = f"🔁 F22 回補檢查 {range_label}"
-    lines = [header,
-             f"掃描 {len(report)} 天 / MOPS 公告 {total_announced} 筆 / "
-             f"{'偵測缺漏' if dry_run else '回補'} {total_fill} 筆"]
-    if total_fail:
-        lines.append(f"⚠️ 有 {total_fail} 筆異常（抓取/解析失敗）")
-    if fin_fails:
-        names = "、".join(f"{f['id']} {f['name']}" for f in fin_fails[:8])
-        more  = f" 等{len(fin_fails)}檔" if len(fin_fails) > 8 else ""
-        lines.append(f"🏦 金融股 {len(fin_fails)} 筆略過（F22 不支援金控格式；"
-                     f"月獲利請看重訊自結）：{names}{more}")
+    lines = [f"🔁 F22 回補檢查 {range_label}",
+             f"MOPS 公告 {total_announced} 筆 / "
+             f"{'偵測缺漏' if dry_run else '回補'} {len(to_fill)} 筆"]
 
-    # 工作日（週一~週五）完整性逐日列出
-    lines.append("── 工作日掃描 ──")
-    has_weekday = False
-    for r in report:
-        if r["weekday"] <= 4:  # 週一~週五
-            has_weekday = True
-            wd = WEEKDAY_TW[r["weekday"]]
-            fin = r.get("fin_skip", 0)
-            real_missing = r["missing_before"] - fin - r["filled"]
-            # 沒查成時不准打 ✅（會被誤讀成「這天沒問題」）
-            if verdict and verdict["level"] == "unverified":
-                mark = "❔"
-            else:
-                mark = "⚠️" if real_missing > 0 else "✅"
-            fin_tag = f"（含金融{fin}筆略過）" if fin else ""
-            lines.append(f"{mark} {r['date']}(週{wd}) 公告{r['announced']} "
-                         f"缺{r['missing_before']} 補{r['filled']}{fin_tag}")
-    if not has_weekday:
-        lines.append("（區間內無工作日）")
-
-    # 補回清單
-    if total_fill:
+    if to_fill:
         lines.append("── 補回清單 ──")
-        for it, _ in to_fill:
+        for it, _ in to_fill[:30]:
             lines.append(f"  {it['stock_id']} {it['company_name']} "
                          f"{it['report_year']}/{it['report_month']:02d}"
                          f"（公告 {it['announce_date']}）")
+        if len(to_fill) > 30:
+            lines.append(f"  …等共 {len(to_fill)} 筆")
 
-    # 異常清單（需人工檢查）
     if fails:
-        lines.append("── ⚠️ 異常（需人工檢查）──")
-        for f in fails:
-            lines.append(f"  {f['id']} {f['name']}（{f['date']}）{f['reason']}")
+        names = "、".join(f"{f['id']} {f['name']}" for f in fails[:5])
+        more  = f" 等{len(fails)}筆" if len(fails) > 5 else ""
+        lines.append(f"⚠️ 異常 {len(fails)} 筆（需人工檢查）：{names}{more}")
+    if fin_fails:
+        lines.append(f"🏦 金融股 {len(fin_fails)} 筆略過（不支援金控格式，月獲利見重訊自結）")
 
-    if not total_fill and not fails:
-        # 只有「確定查成」時才准說資料完整，否則會變成假陰性
-        if verdict and verdict["level"] == "unverified":
-            lines.append("（本次未實際查到任何 MOPS 清單，無法判斷有無缺漏）")
-        elif verdict and verdict["level"] == "partial":
-            lines.append("⚠️ 已查成的市場無缺漏，但有市場未查成，不能斷定資料完整")
+    # 結論行
+    if dry_run:
+        lines.append("🔍 dry-run：未寫入、未重抓、未補發")
+    elif to_fill:
+        if sent_n is None:
+            lines.append("（未加 --send，訊息未補發）")
+        elif sent_n == 0:
+            lines.append("📨 無需補發（皆已發送過或被安全閥擋下）")
         else:
-            lines.append("✅ 區間內無缺漏，資料完整")
+            lines.append(f"📨 已補發 {sent_n} 則訊息")
+    elif verdict and verdict["level"] == "unverified":
+        lines.append("❌ 無法驗證：MOPS 清單查不到，本次結果不可信")
+    elif verdict and verdict["level"] == "partial":
+        lines.append("⚠️ 部分市場未查成，不能斷定資料完整")
+    else:
+        lines.append("✅ 區間內無缺漏，資料完整")
 
-    # ── 需要人工介入時，明確寫出「該做什麼」──────────────────────
-    if verdict and verdict["level"] != "ok":
-        lines.append("")
-        lines.append(verdict["title"])
-        if verdict["reasons"]:
-            lines.append("原因：" + "；".join(verdict["reasons"]))
-        lines.append("── 👉 你該做什麼 ──")
-        lines.extend(verdict["action"])
-    elif total_fill and dry_run:
-        lines.append("")
-        lines.append("── 👉 你該做什麼 ──")
-        if total_fill <= 9:
-            lines.append(f"缺 {total_fill} 筆（少量，多為公告延遲）→ 直接回補：")
-            lines.append("   cd /Users/starmark/Downloads/scripts/mops_f22 && python3 check_backfill_f22.py --days 2")
+    # ── 清單覆蓋檢查：核心要求「清單內有公告就一定要收到訊息」的最終驗證 ──
+    if audit is not None:
+        unsent, total, stale = audit
+        if not total:
+            lines.append("👤 清單內本期無公告")
+        elif stale:
+            lines.append(f"👤 清單覆蓋 {total} 檔（區間超過 {F22.SENT_KEEP_DAYS} 天，"
+                         f"發送紀錄已過期，無法判定）")
+        elif not unsent:
+            lines.append(f"👤 清單覆蓋 {total} 檔，全部已發送 ✅")
         else:
-            lines.append(f"缺 {total_fill} 筆（數量偏多）→ **先別急著回補**。")
-            lines.append("1) 先看是哪幾天整批漏，確認該日排程是否失敗（看執行紀錄）。")
-            lines.append("2) 查明原因後再回補，否則補完下次照樣漏。")
-            lines.append("3) 回補時分批做（一次 --days 2），一次補太多易被 MOPS 限流。")
+            names = "、".join(f"{s} {n}" for s, n, _ in unsent[:8])
+            more  = f" 等{len(unsent)}檔" if len(unsent) > 8 else ""
+            lines.append(f"👤 ⚠️ 清單內 {len(unsent)}/{total} 檔有資料卻未發送：{names}{more}")
+            lines.append("   → 補發：python3 backfill_send_f22.py <起日> <迄日>")
 
     return "\n".join(lines)
 

@@ -227,6 +227,8 @@ def mops_link(co_id):
 # 工具
 # =========================
 def clean_text(text):
+    # 2026-10-19：str(dict) fallback 會把全形空白轉成字面 "\\u3000"，其中 "3000" 被當成數字（3287 案例）
+    text = text.replace("\\u3000", " ")
     return re.sub(r"\n\s*\n", "\n", text).strip()
 
 
@@ -670,7 +672,7 @@ def extract_financials_both(text):
     if e_hdr and "會計項目" in text:
         q_num  = (int(e_hdr.group(3)) - 1) // 3 + 1
         e_keys = [("營業收入", "營收"), ("營業毛利", "毛利"), ("稅前淨利", "稅前"),
-                  ("歸屬母公司淨利", "母利"), ("本期淨利", "_本期"),
+                  ("歸屬母公司稅後淨利", "母利"), ("歸屬母公司淨利", "母利"), ("本期淨利", "_本期"),
                   ("基本每股盈餘", "EPS")]
         e_found = {}
         for line in text.split('\n'):
@@ -725,6 +727,108 @@ def extract_financials_both(text):
             if len(f_found) >= 4:
                 return {}, None, f_found, f"{f_year} Q{f_q}", unit_str
 
+    # ── 格式 I（3491 昇達科型）：「NNN年前N季」今年 vs 去年 同期累計對照 ──
+    #   表頭「115年前三季　114年前三季　YoY」，兩欄是「同一期間、不同年度」。
+    #   2026-10-29 昇達科案例的錯誤：左欄被當成「月」、右欄（去年前三季）被當成
+    #   「季單季」發出——等於把去年數字當成今年單季，嚴重誤導
+    #   （訊息顯示「季單季 營收1,618」，實為 2025 年前三季累計，已與 F27 官方
+    #    2025Q3 累計 1,617.7 百萬核對吻合）。
+    #   本分支只回傳「今年累計」為季段資料，去年值交由 format_company_block_v2
+    #   以 q_last_idx=1 從公告行取得，避免兩個年度被當成兩個期間。
+    # ⚠️ 必須是「表頭行」才算：兩個年度標籤之間只能有空白。
+    #    台塑四寶的敘述句「2026年前三季合併損益與2025年前三季比較：」也含兩個標籤，
+    #    若不限制會誤判（2026-10-29 實測誤傷 1301/1303/1326/6505，且台化、台塑化的
+    #    去年值被改錯：1,780→177,300、8,584→888,500）。
+    i_hdr = re.search(
+        r'^[^\n\S]*(?:項\s*目|科\s*目)?[^\n\S]*'
+        r'(?<!\d)(\d{3,4})\s*年\s*前\s*([一二三四1-4])\s*季[ \t　]+'
+        r'(?<!\d)(\d{3,4})\s*年\s*前\s*([一二三四1-4])\s*季',
+        text, re.M)
+    if i_hdr:
+        _cn = {"一": 1, "二": 2, "三": 3, "四": 4}
+        i_y = int(i_hdr.group(1)); i_y = i_y if i_y >= 1911 else i_y + 1911
+        i_q = _cn.get(i_hdr.group(2), 0) or int(i_hdr.group(2))
+        i_keys = [("每股盈餘", "EPS"),
+                  ("歸屬於母公司", "母利"), ("歸屬母公司", "母利"), ("母公司業主", "母利"),
+                  ("稅前淨利", "稅前"), ("稅前損益", "稅前"),
+                  ("營業利益", "營益"), ("營業淨利", "營益"),
+                  ("本期淨利", "_本期"), ("稅後淨利", "_本期"),
+                  ("營業毛利", "毛利"), ("營業收入", "營收")]
+        i_found = {}
+        for line in text.split('\n'):
+            s = line.strip()
+            if not s or "率" in s[:14]:
+                continue
+            for kw, label in i_keys:
+                if kw in s and label not in i_found:
+                    after = s[s.index(kw) + len(kw):]
+                    # 去掉百分比欄（YoY），只留絕對數
+                    after = re.sub(r'[-+]?[\d,.]+\s*[%％]', '', after)
+                    nums = re.findall(r'\(?-?[\d,]+(?:\.\d+)?\)?', after)
+                    if nums:                       # 第1個 = 今年；第2個 = 去年（不取）
+                        v = nums[0]; neg = v.startswith('(')
+                        i_found[label] = _fmt_num(('-' if neg else '') + v.strip('()'),
+                                                  unit_factor or 1, label)
+                    break
+        if "母利" not in i_found and "_本期" in i_found:
+            i_found["母利"] = i_found["_本期"]
+        i_found.pop("_本期", None)
+        if len(i_found) >= 3:
+            return {}, None, i_found, f"{i_y} 前{i_hdr.group(2)}季累計", unit_str
+
+    # ── 格式 H（2467 志聖型）：「NNN年Q{n}」單季 vs「NNN年Q{n}累計」兩欄對照 ──
+    #   表頭「115年Q3　　115年Q3累計」，第1欄=該季單季、第2欄=年初至該季累計。
+    #   2026-10-13 志聖案例的錯誤：左欄被當成「月」、右欄被當成「季單季」，
+    #   兩個期間標籤都抓不到（month_label/qtr_label 皆 None），母淨誤取
+    #   「合併本期淨利」(5.86億) 而非「歸屬於母公司業主」(5.55億)，
+    #   且累計EPS 10.67 被放進單季欄位。
+    #   本分支直接依表頭還原正確期間，並優先取「歸屬母公司」那一行當母淨。
+    h_hdr = re.search(r'(?<!\d)(\d{3,4})\s*年\s*Q\s*([1-4])\s*累\s*計', text)
+    if h_hdr:
+        h_year = int(h_hdr.group(1))
+        h_year = h_year if h_year >= 1911 else h_year + 1911
+        h_q    = int(h_hdr.group(2))
+        # 母公司淨利關鍵字排在「本期淨利」之前，避免取錯行
+        h_keys = [("每股盈餘", "EPS"),
+                  ("歸屬於母公司", "母利"), ("歸屬母公司", "母利"), ("母公司業主", "母利"),
+                  ("稅前淨利", "稅前"), ("稅前損益", "稅前"),
+                  ("營業利益", "營益"), ("營業淨利", "營益"),
+                  ("本期淨利", "_本期"), ("稅後淨利", "_本期"),
+                  ("營業收入", "營收"), ("營業毛利", "毛利")]
+        h_single, h_cum = {}, {}
+        for line in text.split('\n'):
+            s = line.strip()
+            if not s or "率" in s[:14]:
+                continue
+            for kw, label in h_keys:
+                if kw not in s:
+                    continue
+                tgt_s = h_single if label not in h_single else None
+                after = s[s.index(kw) + len(kw):]
+                nums = re.findall(r'\(?-?[\d,]+(?:\.\d+)?\)?', after)
+                if not nums:
+                    break
+                def _conv(v):
+                    neg = v.startswith('(')
+                    return _fmt_num(('-' if neg else '') + v.strip('()'),
+                                    unit_factor or 1, label)
+                # 第1個數字=單季、第2個=累計（只有一個數字時視為累計，如 EPS 常只給累計）
+                if len(nums) >= 2:
+                    if label not in h_single:
+                        h_single[label] = _conv(nums[0])
+                    if label not in h_cum:
+                        h_cum[label] = _conv(nums[1])
+                elif label not in h_cum:
+                    h_cum[label] = _conv(nums[0])
+                break
+        for d in (h_single, h_cum):
+            if "母利" not in d and "_本期" in d:
+                d["母利"] = d["_本期"]
+            d.pop("_本期", None)
+        if len(h_single) >= 3 or len(h_cum) >= 3:
+            return (h_single, f"{h_year} Q{h_q}單季",
+                    h_cum,    f"{h_year} Q{h_q}累計", unit_str)
+
     month_found = {}
     qtr_found   = {}
 
@@ -764,7 +868,8 @@ def extract_financials_both(text):
     # 去年同月值 475，正確應為單季表的 1,914，已用原文人工核對確認）。
     qtr_sect_m = re.search(
         r'最近一季單季|[（(]\s*註?\s*\d+\s*[）)]\s*單季|單季\s*[（(]\s*註?\s*\d+\s*[）)]'
-        r'|[（(]\s*[一二三四五六七八九十]+\s*[）)]\s*單季',
+        r'|[（(]\s*[一二三四五六七八九十]+\s*[）)]\s*單季'
+        r'|(?m:^[ \t]*單季[ \t]+\d{3}年第?[一二三四1-4]季)',   # 4174 浩鼎型：「單季 115年第2季 114年第2季」獨立標題行（2026-10-05）
         text)
     if qtr_sect_m:
         # 格式 A：切出月份段和季度段
@@ -825,7 +930,7 @@ def extract_financials_both(text):
                 if nums:
                     if label not in result_dict and len(nums) > col_idx:
                         result_dict[label] = nums[col_idx]
-                elif keyword in s_for_kw:
+                elif keyword in s_for_kw and not (keyword == '每股盈餘' and re.search(r'每股盈餘[、，]', s_for_kw)):
                     if label not in result_dict and label not in pending:
                         pending[label] = keyword
 
@@ -1502,11 +1607,15 @@ def _fmt_datetime(date_str, time_str):
 
 
 def _month_short(month_label):
-    """'115/03' → '3月'"""
+    """'115/03' → '3月'
+    非月份格式者原樣保留（如格式H的「2026 Q3單季」），
+    否則會被統一吃成「月」，讓人誤以為是單月數字（2026-10-13 志聖案例）。"""
     if not month_label:
         return "月"
     m = re.search(r'/(\d{1,2})$', month_label)
-    return f"{int(m.group(1))}月" if m else "月"
+    if m:
+        return f"{int(m.group(1))}月"
+    return month_label if month_label.strip() else "月"
 
 
 def _display_val(val_str, label):
@@ -1735,6 +1844,43 @@ def _load_ref_dbs():
                     _F27_QTR[key] = d   # 同季多筆自結：後面的（較新公告）覆蓋前面
 
 
+def _f27_single_q(sid, y, q):
+    """取去年同季（單季）稅前/母利/EPS，供單季區塊「去年」欄使用。
+    注意：F27 財報(src=財報)的稅前/母利是「年初累計至該季」，EPS 則 Q1~Q3 為單季、Q4 為全年。
+    → Q2~Q4 稅前/母利 = 本季累計 − 前季累計；Q4 EPS = 全年 − Q1~Q3。
+    前季缺或非財報（無法確定口徑）→ 該欄回 None（不顯示去年值，只留原文%）。自結(src=自結)本就是單季，原樣回傳。
+    2026-09-29 修：原本直接拿累計當單季，Q2~Q4 去年同期稅前/母淨錯誤。"""
+    cur = _F27_QTR.get((sid, y, q))
+    if not cur or cur.get("src") != "財報" or q == 1:
+        return cur
+    prev = _F27_QTR.get((sid, y, q - 1))
+    ok = bool(prev) and prev.get("src") == "財報"
+    # 防呆：全庫約 99% 為累計口徑，少數公司疑為單季口徑。用 EPS 反推核對（股數取 Q1 母利/EPS）：
+    # 若「單季口徑」比「累計口徑」更吻合本季 EPS → 不確定，稅前/母利回 None（不顯示，避免給錯數字）。
+    q1 = _F27_QTR.get((sid, y, 1))
+    if ok and q in (2, 3) and q1 and q1.get("src") == "財報":
+        try:
+            sh = q1["母利"] / q1["EPS"]
+            e = cur["EPS"]
+            if sh > 0 and abs(q1["EPS"]) >= 0.05 and abs(e) >= 0.05:
+                d_cum = abs((cur["母利"] - prev["母利"]) / sh - e)
+                d_one = abs(cur["母利"] / sh - e)
+                if not d_cum < d_one:
+                    ok = False
+        except (TypeError, ZeroDivisionError, KeyError):
+            pass
+    out = dict(cur)
+    for k in ("稅前", "母利"):
+        out[k] = (cur[k] - prev[k]) if ok and cur.get(k) is not None and prev.get(k) is not None else None
+    if q == 4:
+        eps = [_F27_QTR.get((sid, y, i)) or {} for i in (1, 2, 3)]
+        if cur.get("EPS") is not None and all(e.get("src") == "財報" and e.get("EPS") is not None for e in eps):
+            out["EPS"] = round(cur["EPS"] - sum(e["EPS"] for e in eps), 2)
+        else:
+            out["EPS"] = None
+    return out
+
+
 def _fmt_m_ref(v):
     return f"{v:,.0f}" if abs(v) >= 10 else f"{v:.1f}"
 
@@ -1757,8 +1903,11 @@ def _official_pcts(text, keywords):
     for line in (text or "").split("\n"):
         s = re.sub(r'[（(][^)）]*[)）]', '', line)
         if any(kw in s for kw in keywords):
-            for m in re.finditer(r'([-+]?[\d,]+(?:\.\d+)?)\s*[%％]', line):
-                out.append(m.group(1).replace(",", ""))
+            for m in re.finditer(r'([（(]?)\s*([-+]?[\d,]+(?:\.\d+)?)\s*[)）]?\s*[%％]', line):
+                v = m.group(2).replace(",", "")
+                if m.group(1) and not v.startswith(("-", "+")):
+                    v = "-" + v   # 2026-10-18：括號 % 代表負數，如 (1,550.00%)、(11.94)%
+                out.append(v)
     return out
 
 
@@ -1885,12 +2034,17 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
     norm = re.sub(r'[（(][^)）]*[)）]', '', text or "")
     fail_fields = []
 
-    def _val(k, data):
-        """回傳（右對齊字串, 數值 or None）"""
+    def _val(k, data, other=None):
+        """回傳（右對齊字串, 數值 or None）
+        other = 另一期間的資料。若本期缺值但另一期有，代表公告只提供其中一期
+        （如 2467 志聖只給累計EPS、不給單季EPS），屬「未提供」而非解析失敗，
+        不該標 ⚠️ 也不該進人工確認清單。"""
         raw = (data or {}).get(k, "")
         if raw:
             return f"{_display_val(raw, k):>8}", _num(raw)
         if any(kw in norm for kw in _REVIEW_KEYWORDS.get(k, [])):
+            if (other or {}).get(k):
+                return f"{'—':>8}", None   # 另一期有值 → 公告本來就只給一期
             if DISPLAY_NAMES[k] not in fail_fields:
                 fail_fields.append(DISPLAY_NAMES[k])
             return f"{'—⚠️':>7}", None    # 解析失敗（詳見人工確認清單）
@@ -1910,8 +2064,16 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
 
     def _pct(k, period, ann, last):
         """官方% 優先（*），否則 DB 推估（†）"""
+        # 格式I（今年/去年同期兩欄並列，如 3491 昇達科「115年前三季 114年前三季」）：
+        # 這類公告下方多附新聞稿，_official_pcts() 會誤抓敘述句裡的百分比
+        # （2026-10-29 昇達科：抓到「連續六個月單月營收年增率超過50%」的 50%，
+        #  正確值為表格兩欄算出的 +71%）。兩欄皆官方數字，相除結果仍標 *。
+        if is_i and ann is not None and last:
+            return f"{(ann - last) / abs(last) * 100:+.1f}%*"
         p = _off(k, period)
-        if p:
+        # 格式E 且欄序為 [本單季, 去年單季, ...]（9802 型，q_last_idx==1）：表格無%欄，
+        # 官方%會誤抓文末敘述句 → 一律由本季/去年同季自行計算（†）
+        if p and not (period == "q" and is_e and ann is not None and last):   # 2026-10-21：擴大到所有格式E（6768：敘述句%被誤套）
             return f"{p}*"
         est = _est_yoy(ann, last)
         return f"{est}†" if est else ""
@@ -1946,7 +2108,19 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
                 and re.search(r'\d{4}年\s*\d{1,2}\s*~\s*\d{1,2}\s*月', text))
     if is_e:
         has_d = True
-    q_last_idx = 2 if is_e else 3
+    # 格式I（3491型）：同一行就是「今年累計 去年累計」，去年值在第 1 欄
+    is_i = bool(re.search(
+        r'^[^\n\S]*(?:項\s*目|科\s*目)?[^\n\S]*'
+        r'(?<!\d)\d{3,4}\s*年\s*前\s*[一二三四1-4]\s*季[ \t　]+'
+        r'(?<!\d)\d{3,4}\s*年\s*前\s*[一二三四1-4]\s*季', text, re.M))
+    if is_i:
+        has_d = True
+    q_last_idx = 1 if is_i else (2 if is_e else 3)
+    if is_e:
+        # 表頭年份 [Y, Y-1, ...] ＝ 欄序 [本單季, 去年單季, 本累計, 去年累計]（9802 鈺齊型）→ 去年單季在第 1 欄
+        _ey = [int(x) for x in re.findall(r'(\d{4})年\s*\d{1,2}\s*~\s*\d{1,2}\s*月', text)[:2]]
+        if len(_ey) == 2 and _ey[1] == _ey[0] - 1:
+            q_last_idx = 1
     _fac_d = (detect_unit(text)[1] or 1) if has_d else 1
 
     def _d_last(k, idx):
@@ -1975,7 +2149,7 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
                 last = _F22_REV.get((sid, ym[0] - 1, ym[1]))
                 # 公告本身沒附去年同月欄，改用DB值時，若該月是反推補值要標註
                 last_derived = (sid, ym[0] - 1, ym[1]) in _F22_DERIVED
-        vstr, ann = _val("營收", month_data)
+        vstr, ann = _val("營收", month_data, qtr_data)
         if ann is not None and now and abs(ann - now) / now > 0.10:
             if qnow and abs(ann - qnow) / qnow < 0.02:
                 title = "▍單季（DB核對：此為單季數，非單月）"
@@ -1991,7 +2165,7 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
         # 去年同月獲利：公告有「去年同月」欄（格式D）用官方值(*)；否則查 DB 歷史月自結(†)
         jm_last = _JISHI_M.get((sid, ym[0] - 1, ym[1])) if ym else None
         for k in ("稅前", "母利", "EPS"):
-            vstr, ann_k = _val(k, month_data)
+            vstr, ann_k = _val(k, month_data, qtr_data)
             lastv = _d_last(k, 1)
             if lastv is None and jm_last:
                 lastv = jm_last.get(k)
@@ -2019,14 +2193,19 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
 
             ytd_now, ytd_last = _ytd_sum(_yy), _ytd_sum(_yy - 1)
             title = f"▍1-{_mn}月累計"
-            vstr, ann_rev = _val("營收", qtr_data)
+            vstr, ann_rev = _val("營收", qtr_data, month_data)
             if ann_rev is not None and ytd_now and abs(ann_rev - ytd_now) / ytd_now < 0.02:
                 title += "（DB核對）"
             base_last = ytd_last
+        elif qtr_label and ("累計" in qtr_label or "前" in qtr_label):
+            # 標籤本身already說明期間（如「2026 前三季累計」），再加「單季」會自相矛盾
+            title = f"▍{qtr_label}"
+            vstr, ann_rev = _val("營收", qtr_data, month_data)
+            base_last = _d_last("營收", q_last_idx)
         else:
             qtag = qtr_label.replace("20", "", 1).replace(" ", "") if qtr_label else "季"
             title = f"▍{qtag}單季"
-            vstr, ann_rev = _val("營收", qtr_data)
+            vstr, ann_rev = _val("營收", qtr_data, month_data)
             base_last = _d_last("營收", q_last_idx) or qlast
         if ann_rev is not None and qnow and abs(ann_rev - qnow) / qnow > 0.10:
             _y2, _q2 = int(mq.group(1)), int(mq.group(2))
@@ -2046,9 +2225,9 @@ def format_company_block_v2(item, month_data, month_label, qtr_data, qtr_label, 
             vstr, ann_rev = f"{_fmt_m_ref(qnow):>5}(DB)", qnow
         lines.append(title)
         lines.append(_line("營收", vstr, base_last, pct=_pct("營收", "q", ann_rev, base_last)))
-        last27 = _F27_QTR.get((sid, int(mq.group(1)) - 1, int(mq.group(2)))) if mq else None
+        last27 = _f27_single_q(sid, int(mq.group(1)) - 1, int(mq.group(2))) if mq else None
         for k in ("稅前", "母利", "EPS"):
-            vstr, ann_k = _val(k, qtr_data)
+            vstr, ann_k = _val(k, qtr_data, month_data)
             lv = _d_last(k, q_last_idx)
             if lv is None:
                 lv = last27.get(k) if last27 else None
@@ -2600,16 +2779,16 @@ def run():
         group_has_msg = False
         for header_tmpl, block_tuples, digest in [
             # 自結（月+季合併）：速報格式，{n}=家數，警示置頂，尾附圖例
-            (f"📈 M99 自結速報 {today_str}（{{n}}家｜百萬）｜👤 {group_display}", blocks_m + blocks_q, True),
+            (f"📈 M99 自結損益 {today_str}（{{n}}家｜百萬）｜👤 {group_display}", blocks_m + blocks_q, True),
             (f"📋 M31 季報（董事會通過） {today_str}｜👤 {group_display}", qrpt_blocks, False),
-            (f"📑 年報（董事會通過） {today_str}｜👤 {group_display}", annual_blocks, False),
+            (f"📑 M31 年報（董事會通過） {today_str}｜👤 {group_display}", annual_blocks, False),
         ]:
             for m in _build_messages_for_group(header_tmpl, block_tuples, group, digest):
                 output.append({"message": m, "group": group})
                 group_has_msg = True
         # 月營收精簡區塊（早鳥訊號；正式紀錄由 mops_f22 負責）
         for m in _build_revenue_message_for_group(
-            f"🧾 自結營收/月(早鳥·非正式) {today_str}｜👤 {group_display}", revenue_blocks, group
+            f"🧾 M99 自結營收（早鳥·非正式） {today_str}｜👤 {group_display}", revenue_blocks, group
         ):
             output.append({"message": m, "group": group})
             group_has_msg = True

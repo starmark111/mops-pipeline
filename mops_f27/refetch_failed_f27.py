@@ -14,14 +14,84 @@ refetch_failed_f27.py
 
   # 看還剩多少筆待重抓（不抓，只統計）
   python3 refetch_failed_f27.py --status
+
+  # 重抓完成後，接著補發 Telegram 訊息（比照 check_backfill_f22.py 的 --send）
+  python3 refetch_failed_f27.py --send
 """
 
 import os
+import re
 import sys
 import time
+import subprocess
 import requests
+from datetime import datetime, timedelta
 
 import mops_f27_daily as F27
+
+
+# =========================
+# --send：補發重抓資料的 Telegram 訊息
+# =========================
+# 為什麼需要：本支只寫 CSV，而每日排程只看「當天新抓到的公告」、不回頭掃 CSV，
+# 因此靠重抓救回來的資料，訊息永遠不會發出。加上 --send 才算真正完成
+# 「有公告就一定收到訊息」。作法與 check_backfill_f22.py 一致。
+#
+# 兩道安全閥（2026-09-30 加入）：
+#   1. SEND_MAX_DAYS：只補發近 N 天的公告。failed_fetches.csv 會累積數月舊資料
+#      （實測橫跨 17 個月、337 則），全送會被舊季報洗版。
+#   2. SEND_WARN_LIMIT：預估則數超過上限就停下來只報告，需加 --force 才真的送。
+SEND_MAX_DAYS   = 30
+SEND_WARN_LIMIT = 50
+
+
+def _do_send(results):
+    """呼叫既有的 backfill_send_f27.py 補發訊息（格式／分群／去重全部沿用，
+    不另寫一套；sent_state_f27.json 會自動跳過已發送者，可安全重跑）。"""
+    emit  = "--emit" in sys.argv
+    force = "--force" in sys.argv
+    sys.stderr.write("\n📨 --send：補發重抓資料的 Telegram 訊息…\n")
+
+    all_dates = sorted({it.get("announce_date") for it, _ in results if it.get("announce_date")})
+    if not all_dates:
+        sys.stderr.write("  （重抓資料無公告日期，略過補發）\n")
+        return
+
+    # ── 安全閥 1：日期範圍 ──
+    cutoff  = (datetime.now() - timedelta(days=SEND_MAX_DAYS)).strftime("%Y-%m-%d")
+    dates   = all_dates if force else [d for d in all_dates if d >= cutoff]
+    skipped = [] if force else [d for d in all_dates if d < cutoff]
+    if skipped:
+        sys.stderr.write(
+            f"  ⏳ 略過 {len(skipped)} 個超過 {SEND_MAX_DAYS} 天的公告日"
+            f"（{skipped[0]} ~ {skipped[-1]}），避免舊資料洗版。\n"
+            f"     要補發這些請加 --force。\n")
+    if not dates:
+        sys.stderr.write("  （近期無可補發的公告）\n")
+        return
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backfill_send_f27.py")
+    base   = [sys.executable, script, dates[0], dates[-1]]
+
+    # ── 安全閥 2：先 dry-run 預估則數（dry-run 不寫 sent_state，安全）──
+    if not force:
+        probe = subprocess.run(base + ["--dry-run"], capture_output=True, text=True)
+        n = sum(int(m.group(1)) for m in re.finditer(r"本日 (\d+) 則", probe.stderr))
+        if n > SEND_WARN_LIMIT:
+            sys.stderr.write(
+                f"  ⚠️  預估會送出 {n} 則（超過上限 {SEND_WARN_LIMIT}），已停止未發送。\n"
+                f"     區間 {dates[0]} ~ {dates[-1]}。確認要送請加 --force，或先手動跑：\n"
+                f"     python3 backfill_send_f27.py {dates[0]} {dates[-1]} --dry-run\n")
+            return
+        sys.stderr.write(f"  預估 {n} 則，開始補發…\n")
+
+    cmd = base + (["--emit"] if emit else [])
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    sys.stderr.write(r.stderr)
+    if emit and r.stdout.strip():
+        print(r.stdout.strip())
+    if r.returncode != 0:
+        sys.stderr.write(f"⚠️  補發失敗（return code {r.returncode}），資料已寫入但訊息未送出\n")
 
 
 def main():
@@ -60,6 +130,9 @@ def main():
             f"   還有 {len(fetch_failed)} 筆留在 failed_fetches.csv，"
             f"建議再等久一點、用更慢速率（如 F27_DELAY=3 F27_BACKOFF=8）再跑一次。\n"
         )
+
+    if "--send" in sys.argv and results:
+        _do_send(results)
 
 
 if __name__ == "__main__":

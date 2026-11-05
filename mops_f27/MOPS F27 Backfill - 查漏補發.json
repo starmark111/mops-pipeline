@@ -1,0 +1,134 @@
+{
+ "name": "MOPS F27 Backfill - 查漏補發",
+ "nodes": [
+  {
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "cronExpression",
+       "expression": "50 23 * * *"
+      }
+     ]
+    }
+   },
+   "id": "schedule-trigger-f27-backfill",
+   "name": "Schedule Trigger (每天 23:50)",
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.2,
+   "position": [
+    240,
+    320
+   ]
+  },
+  {
+   "parameters": {},
+   "id": "manual-trigger-f27-backfill",
+   "name": "Manual Trigger",
+   "type": "n8n-nodes-base.manualTrigger",
+   "typeVersion": 1,
+   "position": [
+    240,
+    500
+   ]
+  },
+  {
+   "parameters": {
+    "command": "cd /Users/starmark/Downloads/scripts/mops_f27 && python3 find_missing_f27.py --days 7 --send --emit"
+   },
+   "id": "execute-f27-backfill",
+   "name": "執行 find_missing_f27.py（查漏+回補+補發）",
+   "type": "n8n-nodes-base.executeCommand",
+   "typeVersion": 1,
+   "position": [
+    480,
+    400
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "// stdout 可能有「兩行」JSON：\n//   第1行 = --send 補發的訊息（可能沒有，視有無缺漏而定）\n//   第2行 = 回補摘要（一定有）\n// 逐行解析並合併，單行時也能正常運作。\nconst raw = ($input.first().json.stdout || '').trim();\nconst out = [];\nfor (const line of raw.split('\\n')) {\n  const s = line.trim();\n  if (!s.startsWith('[')) continue;\n  try {\n    const arr = JSON.parse(s);\n    if (Array.isArray(arr)) out.push(...arr);\n  } catch (e) {\n    // 非 JSON 的雜訊行直接略過\n  }\n}\nfunction escapeHtml(text) {\n  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\nreturn out.map(m => ({ json: { group: m.group || m.sheet, message: '<pre>' + escapeHtml(m.message) + '</pre>' } }));"
+   },
+   "id": "split-messages-f27-backfill",
+   "name": "拆分訊息（補發＋摘要）",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    720,
+    400
+   ]
+  },
+  {
+   "parameters": {
+    "chatId": "1085373824",
+    "text": "={{ $json.message }}",
+    "additionalFields": {
+     "appendAttribution": false,
+     "parse_mode": "HTML"
+    }
+   },
+   "id": "telegram-send-f27-backfill",
+   "name": "Telegram 發送",
+   "type": "n8n-nodes-base.telegram",
+   "typeVersion": 1.2,
+   "position": [
+    960,
+    400
+   ],
+   "credentials": {
+    "telegramApi": {
+     "name": "Telegram - Market Bot"
+    }
+   }
+  }
+ ],
+ "connections": {
+  "Schedule Trigger (每天 23:50)": {
+   "main": [
+    [
+     {
+      "node": "執行 find_missing_f27.py（查漏+回補+補發）",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Manual Trigger": {
+   "main": [
+    [
+     {
+      "node": "執行 find_missing_f27.py（查漏+回補+補發）",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "執行 find_missing_f27.py（查漏+回補+補發）": {
+   "main": [
+    [
+     {
+      "node": "拆分訊息（補發＋摘要）",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "拆分訊息（補發＋摘要）": {
+   "main": [
+    [
+     {
+      "node": "Telegram 發送",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "timezone": "Asia/Taipei"
+ }
+}

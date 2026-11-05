@@ -194,11 +194,14 @@ def fetch_data_and_save():
         bias_txt = f"{bias:+.1f}%（{bias_tag}）"
     else:
         bias_txt = f"N/A(資料 {len(idx)}/60 日)"
-    win = tos[-120:]  # 半年
-
-    to_pct = sum(1 for t in win if t <= turnover_billion) / len(win) * 100
-    to_tag = "爆量" if to_pct >= 90 else "量縮" if to_pct <= 20 else "正常"
-    to_txt = f"{to_pct:.0f}%（{to_tag}）"
+    # 成交金額 120 日（半年線）乖離率 = 今日成交金額 / 近120日均額 - 1
+    win = tos[-120:]
+    if len(win) >= 60:
+        to_bias = (turnover_billion / (sum(win) / len(win)) - 1) * 100
+        to_tag = "爆量" if to_bias >= 50 else "量縮" if to_bias <= -30 else "正常"
+        to_txt = f"{to_bias:+.0f}%（{to_tag}）"
+    else:
+        to_txt = f"N/A(資料 {len(win)}/60 日)"
 
     message = f"""
 📊 台股盤後數據（{date_raw}）
@@ -214,7 +217,7 @@ def fetch_data_and_save():
 
 融資餘額: {margin_today:,.1f} 億（{margin_chg:+,.1f} 億）｜距高點 {dd_pct:+.1f}%{stale_txt}
 外資期貨空單: {oi_txt}
-60日乖離率: {bias_txt}｜成交熱度: {to_txt}
+60日乖離率: {bias_txt}｜成交量120日乖離: {to_txt}
 
 狀態: {state} {reason}"""
     print(message)
